@@ -4,7 +4,7 @@
     <Platform Name="arm64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="JBCleanupExtension.csproj">
+  <Project Path="JBCleanupExtension.csproj" Id="fc58a4f5-a543-4260-970e-3eb35f2cdd68">
     <Platform Solution="*|arm64" Project="arm64" />
     <Platform Solution="*|x86" Project="x86" />
   </Project>

@@ -72,6 +72,14 @@
     </Bitmaps>
   </Commands>
 
+  <KeyBindings>
+    <KeyBinding guid="guidJBCleanupExtensionPackageCmdSet"
+                id="CleanupCommandId"
+                editor="guidVSStd97"
+                key1="F"
+                mod1="Control Alt" />
+  </KeyBindings>
+
   <Symbols>
     <!-- This is the package guid. -->
     <GuidSymbol name="guidJBCleanupExtensionPackage" value="{0ef83031-3d1f-412b-9e1c-6e0f337992a5}" />

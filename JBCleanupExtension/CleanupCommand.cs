@@ -1,102 +1,146 @@
-﻿using Microsoft.VisualStudio.Shell;
+﻿using EnvDTE;
+using EnvDTE80;
+using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
 using System;
 using System.ComponentModel.Design;
-using System.Globalization;
-using System.Threading;
+using System.Diagnostics;
 using System.Threading.Tasks;
 using Task = System.Threading.Tasks.Task;
 
 namespace JBCleanupExtension
 {
-    /// <summary>
-    /// Command handler
-    /// </summary>
     internal sealed class CleanupCommand
     {
-        /// <summary>
-        /// Command ID.
-        /// </summary>
         public const int CommandId = 0x0100;
-
-        /// <summary>
-        /// Command menu group (command set GUID).
-        /// </summary>
         public static readonly Guid CommandSet = new Guid("a60f18ee-381d-4e57-8500-33dc3a30708c");
 
-        /// <summary>
-        /// VS Package that provides this command, not null.
-        /// </summary>
-        private readonly AsyncPackage package;
+        // Хардкоженные пути — как в твоём PS скрипте
+        private const string SolutionPath = @"C:\code\pki-ca\PkiCa.sln";
+        private const string RepoRoot = @"C:\code\pki-ca";
+        private const string ProfileName = "PkiCaLight";
+        private const string DotSettingsFileName = "PkiCa.sln.DotSettings";
 
-        /// <summary>
-        /// Initializes a new instance of the <see cref="CleanupCommand"/> class.
-        /// Adds our command handlers for menu (commands must exist in the command table file)
-        /// </summary>
-        /// <param name="package">Owner package, not null.</param>
-        /// <param name="commandService">Command service to add command to, not null.</param>
+        private readonly AsyncPackage _package;
+
         private CleanupCommand(AsyncPackage package, OleMenuCommandService commandService)
         {
-            this.package = package ?? throw new ArgumentNullException(nameof(package));
-            commandService = commandService ?? throw new ArgumentNullException(nameof(commandService));
-
+            _package = package ?? throw new ArgumentNullException(nameof(package));
             var menuCommandID = new CommandID(CommandSet, CommandId);
-            var menuItem = new MenuCommand(this.Execute, menuCommandID);
+            var menuItem = new MenuCommand(Execute, menuCommandID);
             commandService.AddCommand(menuItem);
         }
 
-        /// <summary>
-        /// Gets the instance of the command.
-        /// </summary>
-        public static CleanupCommand Instance
-        {
-            get;
-            private set;
-        }
+        public static CleanupCommand Instance { get; private set; }
 
-        /// <summary>
-        /// Gets the service provider from the owner package.
-        /// </summary>
-        private Microsoft.VisualStudio.Shell.IAsyncServiceProvider ServiceProvider
-        {
-            get
-            {
-                return this.package;
-            }
-        }
-
-        /// <summary>
-        /// Initializes the singleton instance of the command.
-        /// </summary>
-        /// <param name="package">Owner package, not null.</param>
         public static async Task InitializeAsync(AsyncPackage package)
         {
-            // Switch to the main thread - the call to AddCommand in CleanupCommand's constructor requires
-            // the UI thread.
             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(package.DisposalToken);
-
-            OleMenuCommandService commandService = await package.GetServiceAsync(typeof(IMenuCommandService)) as OleMenuCommandService;
+            var commandService = await package.GetServiceAsync<IMenuCommandService, OleMenuCommandService>();
             Instance = new CleanupCommand(package, commandService);
         }
 
-        /// <summary>
-        /// This function is the callback used to execute the command when the menu item is clicked.
-        /// See the constructor to see how the menu item is associated with this function using
-        /// OleMenuCommandService service and MenuCommand class.
-        /// </summary>
-        /// <param name="sender">Event sender.</param>
-        /// <param name="e">Event args.</param>
         private void Execute(object sender, EventArgs e)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
-            string message = string.Format(CultureInfo.CurrentCulture, "Inside {0}.MenuItemCallback()", this.GetType().FullName);
-            string title = "CleanupCommand";
 
-            // Show a message box to prove we were here
+            var dte = (DTE2)Microsoft.VisualStudio.Shell.Package.GetGlobalService(typeof(DTE));
+            if (dte == null) return;
+
+            // Получаем активный файл
+            var activeDoc = dte.ActiveDocument;
+            if (activeDoc == null)
+            {
+                ShowMessage("Нет активного файла!");
+                return;
+            }
+
+            // Проверяем что это .cs файл
+            if (!activeDoc.FullName.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
+            {
+                ShowMessage("Активный файл не является .cs файлом!");
+                return;
+            }
+
+            // Сохраняем перед форматированием
+            activeDoc.Save();
+
+            RunCleanup(activeDoc.FullName);
+        }
+
+        private void RunCleanup(string filePath)
+        {
+            var settingsPath = System.IO.Path.Combine(RepoRoot, DotSettingsFileName);
+
+            // Собираем аргументы — точно как в PS скрипте:
+            // jb cleanupcode <file> --profile=... --settings=... --no-build
+            var args = $"cleanupcode \"{filePath}\"" +
+                       $" --profile={ProfileName}" +
+                       $" --settings=\"{settingsPath}\"" +
+                       $" --no-build";
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = "jb",
+                Arguments = args,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            ShowStatusBar("🔄 JetBrains Cleanup запущен...");
+
+            var process = new System.Diagnostics.Process { StartInfo = psi };
+
+            process.EnableRaisingEvents = true;
+            process.Exited += (s, ev) =>
+            {
+                var output = process.StandardOutput.ReadToEnd();
+                var error = process.StandardError.ReadToEnd();
+                var exitCode = process.ExitCode;
+
+                ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
+                {
+                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+
+                    if (exitCode == 0)
+                    {
+                        ShowStatusBar("✅ Cleanup завершён успешно!");
+                        ReloadActiveDocument();
+                    }
+                    else
+                    {
+                        ShowStatusBar("❌ Cleanup завершился с ошибкой");
+                        ShowMessage($"Ошибка:\n{error}\n\nВывод:\n{output}");
+                    }
+                }).FileAndForget("JBCleanupExtension/cleanup");
+            };
+
+            process.Start();
+        }
+
+        private void ReloadActiveDocument()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var dte = (DTE2)Microsoft.VisualStudio.Shell.Package.GetGlobalService(typeof(DTE));
+            dte?.ExecuteCommand("File.ReloadAllFiles");
+        }
+
+        private void ShowStatusBar(string message)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var statusBar = (IVsStatusbar)Microsoft.VisualStudio.Shell.Package.GetGlobalService(typeof(SVsStatusbar));
+            statusBar?.SetText(message);
+        }
+
+        private void ShowMessage(string message)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
             VsShellUtilities.ShowMessageBox(
-                this.package,
+                _package,
                 message,
-                title,
+                "JetBrains Cleanup",
                 OLEMSGICON.OLEMSGICON_INFO,
                 OLEMSGBUTTON.OLEMSGBUTTON_OK,
                 OLEMSGDEFBUTTON.OLEMSGDEFBUTTON_FIRST);
