@@ -5,7 +5,6 @@ using Microsoft.VisualStudio.Shell.Interop;
 using System;
 using System.ComponentModel.Design;
 using System.Diagnostics;
-using System.Threading.Tasks;
 using Task = System.Threading.Tasks.Task;
 
 namespace JBCleanupExtension
@@ -14,12 +13,6 @@ namespace JBCleanupExtension
     {
         public const int CommandId = 0x0100;
         public static readonly Guid CommandSet = new Guid("a60f18ee-381d-4e57-8500-33dc3a30708c");
-
-        // Хардкоженные пути — как в твоём PS скрипте
-        private const string SolutionPath = @"C:\code\pki-ca\PkiCa.sln";
-        private const string RepoRoot = @"C:\code\pki-ca";
-        private const string ProfileName = "PkiCaLight";
-        private const string DotSettingsFileName = "PkiCa.sln.DotSettings";
 
         private readonly AsyncPackage _package;
 
@@ -44,40 +37,66 @@ namespace JBCleanupExtension
         {
             ThreadHelper.ThrowIfNotOnUIThread();
 
-            var dte = (DTE2)Microsoft.VisualStudio.Shell.Package.GetGlobalService(typeof(DTE));
+            var dte = (DTE2)Package.GetGlobalService(typeof(DTE));
             if (dte == null) return;
 
-            // Получаем активный файл
+            var solutionPath = dte.Solution?.FullName;
+            if (string.IsNullOrEmpty(solutionPath))
+            {
+                ShowMessage("No solution is open!");
+                return;
+            }
+
+            var repoRoot = System.IO.Path.GetDirectoryName(solutionPath);
+
             var activeDoc = dte.ActiveDocument;
             if (activeDoc == null)
             {
-                ShowMessage("Нет активного файла!");
+                ShowMessage("No active file!");
                 return;
             }
 
-            // Проверяем что это .cs файл
             if (!activeDoc.FullName.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
             {
-                ShowMessage("Активный файл не является .cs файлом!");
+                ShowMessage("Active file is not a .cs file!");
                 return;
             }
 
-            // Сохраняем перед форматированием
-            activeDoc.Save();
+            // Get options
+            var options = (CleanupOptions)_package.GetDialogPage(typeof(CleanupOptions));
+            var profileName = options.ProfileName;
 
-            RunCleanup(activeDoc.FullName);
+            // If DotSettingsFileName is empty — auto-detect based on .sln file name
+            var dotSettingsFileName = string.IsNullOrEmpty(options.DotSettingsFileName)
+                ? System.IO.Path.GetFileName(solutionPath) + ".DotSettings"
+                : options.DotSettingsFileName;
+
+            activeDoc.Save();
+            RunCleanup(repoRoot, activeDoc.FullName, profileName, dotSettingsFileName);
         }
 
-        private void RunCleanup(string filePath)
+        private void RunCleanup(string repoRoot, string filePath, string profileName, string dotSettingsFileName)
         {
-            var settingsPath = System.IO.Path.Combine(RepoRoot, DotSettingsFileName);
+            var jbPath = FindExecutableInPath("jb");
+            if (jbPath == null)
+            {
+                ShowMessage(
+                    "JetBrains CLI tool 'jb' was not found in PATH.\n\n" +
+                    "Please install it via JetBrains Toolbox or manually:\n" +
+                    "https://www.jetbrains.com/help/resharper/ReSharper_Command_Line_Tools.html");
+                return;
+            }
 
-            // Собираем аргументы — точно как в PS скрипте:
-            // jb cleanupcode <file> --profile=... --settings=... --no-build
+            var settingsPath = System.IO.Path.Combine(repoRoot, dotSettingsFileName);
+
             var args = $"cleanupcode \"{filePath}\"" +
-                       $" --profile={ProfileName}" +
                        $" --settings=\"{settingsPath}\"" +
                        $" --no-build";
+
+            if (!string.IsNullOrEmpty(profileName))
+            {
+                args += $" --profile={profileName}";
+            }
 
             var psi = new ProcessStartInfo
             {
@@ -89,7 +108,7 @@ namespace JBCleanupExtension
                 CreateNoWindow = true
             };
 
-            ShowStatusBar("🔄 JetBrains Cleanup запущен...");
+            ShowStatusBar("🔄 JetBrains Cleanup running...");
 
             var process = new System.Diagnostics.Process { StartInfo = psi };
 
@@ -100,21 +119,23 @@ namespace JBCleanupExtension
                 var error = process.StandardError.ReadToEnd();
                 var exitCode = process.ExitCode;
 
+#pragma warning disable VSTHRD110
                 ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
                 {
                     await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
 
                     if (exitCode == 0)
                     {
-                        ShowStatusBar("✅ Cleanup завершён успешно!");
+                        ShowStatusBar("✅ Cleanup completed successfully!");
                         ReloadActiveDocument();
                     }
                     else
                     {
-                        ShowStatusBar("❌ Cleanup завершился с ошибкой");
-                        ShowMessage($"Ошибка:\n{error}\n\nВывод:\n{output}");
+                        ShowStatusBar("❌ Cleanup failed");
+                        ShowMessage($"Error:\n{error}\n\nOutput:\n{output}");
                     }
                 }).FileAndForget("JBCleanupExtension/cleanup");
+#pragma warning restore VSTHRD110
             };
 
             process.Start();
@@ -123,14 +144,14 @@ namespace JBCleanupExtension
         private void ReloadActiveDocument()
         {
             ThreadHelper.ThrowIfNotOnUIThread();
-            var dte = (DTE2)Microsoft.VisualStudio.Shell.Package.GetGlobalService(typeof(DTE));
+            var dte = (DTE2)Package.GetGlobalService(typeof(DTE));
             dte?.ExecuteCommand("File.ReloadAllFiles");
         }
 
         private void ShowStatusBar(string message)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
-            var statusBar = (IVsStatusbar)Microsoft.VisualStudio.Shell.Package.GetGlobalService(typeof(SVsStatusbar));
+            var statusBar = (IVsStatusbar)Package.GetGlobalService(typeof(SVsStatusbar));
             statusBar?.SetText(message);
         }
 
@@ -144,6 +165,21 @@ namespace JBCleanupExtension
                 OLEMSGICON.OLEMSGICON_INFO,
                 OLEMSGBUTTON.OLEMSGBUTTON_OK,
                 OLEMSGDEFBUTTON.OLEMSGDEFBUTTON_FIRST);
+        }
+
+        private static string FindExecutableInPath(string executable)
+        {
+            var pathEnv = Environment.GetEnvironmentVariable("PATH");
+            if (string.IsNullOrEmpty(pathEnv)) return null;
+
+            foreach (var dir in pathEnv.Split(System.IO.Path.PathSeparator))
+            {
+                var fullPath = System.IO.Path.Combine(dir, executable + ".exe");
+                if (System.IO.File.Exists(fullPath))
+                    return fullPath;
+            }
+
+            return null;
         }
     }
 }

@@ -26,6 +26,7 @@ namespace JBCleanupExtension
     [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
     [Guid(JBCleanupExtensionPackage.PackageGuidString)]
     [ProvideMenuResource("Menus.ctmenu", 1)]
+    [ProvideOptionPage(typeof(CleanupOptions), "JetBrains Cleanup", "General", 0, 0, true)]
     public sealed class JBCleanupExtensionPackage : AsyncPackage
     {
         /// <summary>
